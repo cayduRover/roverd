@@ -3,6 +3,7 @@ name: Build Roverd APK
 on:
   push:
     paths:
+      - 'roverd-android-source.zip'
       - '.github/workflows/build-apk.yml'
   workflow_dispatch:
 
@@ -15,16 +16,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Reassemble modified Android source
+      - name: Unpack modified Android source
         run: |
           set -e
-          cat payload/part* > /tmp/roverd-source.b64
-          base64 --decode /tmp/roverd-source.b64 > /tmp/roverd-source.zip
+          test -f roverd-android-source.zip
           rm -rf _android_source
           mkdir _android_source
-          unzip -q /tmp/roverd-source.zip -d _android_source
+          unzip -q roverd-android-source.zip -d _android_source
           cp -a _android_source/. .
-          rm -rf _android_source /tmp/roverd-source.b64 /tmp/roverd-source.zip
+          rm -rf _android_source
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
