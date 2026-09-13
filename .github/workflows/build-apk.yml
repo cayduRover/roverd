@@ -55,11 +55,11 @@ jobs:
             exit 1
           fi
 
-      # ------------------------------------------------------------
-      # Java 17 for modern Android SDK tooling
-      # ------------------------------------------------------------
+      # ============================================================
+      # JAVA 17 FOR MODERN ANDROID SDK TOOLS
+      # ============================================================
       - name: Set up Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -80,9 +80,9 @@ jobs:
             "ndk;25.2.9519653" \
             "cmake;3.22.1"
 
-      # ------------------------------------------------------------
-      # Get AUSBC 3.3.3
-      # ------------------------------------------------------------
+      # ============================================================
+      # DOWNLOAD AUSBC 3.3.3
+      # ============================================================
       - name: Download AndroidUSBCamera 3.3.3
         run: |
           set -e
@@ -100,23 +100,19 @@ jobs:
           test -d /tmp/AndroidUSBCamera/libuvc
           test -d /tmp/AndroidUSBCamera/libnative
           test -d /tmp/AndroidUSBCamera/libuvccommon
-          test -d /tmp/AndroidUSBCamera/libutils
 
-      # ------------------------------------------------------------
-      # AUSBC 3.3.3 uses old Gradle 6.7.1.
-      # Use Java 8 for this build.
-      # ------------------------------------------------------------
+      # ============================================================
+      # OLD AUSBC GRADLE NEEDS OLD JAVA
+      # ============================================================
       - name: Set up Java 8 for AndroidUSBCamera
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "8"
 
-      # ------------------------------------------------------------
-      # THIS FIXES THE ERROR YOU JUST GOT
-      #
-      # libuvc/build.gradle reads local.properties to find the NDK.
-      # ------------------------------------------------------------
+      # ============================================================
+      # AUSBC 3.3.3 EXPECTS local.properties
+      # ============================================================
       - name: Create AndroidUSBCamera local.properties
         working-directory: /tmp/AndroidUSBCamera
         run: |
@@ -127,30 +123,71 @@ jobs:
           ndk.dir=${ANDROID_NDK_HOME}
           EOF
 
-          echo "Created:"
+          echo "Created /tmp/AndroidUSBCamera/local.properties"
           cat local.properties
 
-      # ------------------------------------------------------------
-      # Make sure CMake is available to the old project.
-      # ------------------------------------------------------------
-      - name: Verify Android native build tools
+      # ============================================================
+      # FORCE THE REQUIRED CMAKE VERSION USED BY libnative
+      # ============================================================
+      - name: Prepare CMake 3.10.2 compatibility
         run: |
           set -e
 
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          if [ ! -d "$ANDROID_SDK_ROOT/cmake/3.10.2" ]; then
+            echo "Installing CMake 3.10.2..."
 
-          test -d "$ANDROID_NDK_HOME"
+            sdkmanager "cmake;3.10.2"
+          fi
 
-          ls -la "$ANDROID_SDK_ROOT/cmake/3.22.1/bin/cmake"
+          test -d "$ANDROID_SDK_ROOT/cmake/3.10.2"
 
-          "$ANDROID_SDK_ROOT/cmake/3.22.1/bin/cmake" --version
+      # ============================================================
+      # PATCH AUSBC ROOT CONFIG SO IT USES CURRENT SDK
+      # ============================================================
+      - name: Patch AndroidUSBCamera SDK configuration
+        working-directory: /tmp/AndroidUSBCamera
+        run: |
+          set -e
 
-          "$ANDROID_NDK_HOME/ndk-build" --version
+          python3 <<'PY'
+          from pathlib import Path
 
-      # ------------------------------------------------------------
-      # Build AUSBC
-      # ------------------------------------------------------------
+          p = Path("build.gradle")
+          s = p.read_text()
+
+          s = s.replace(
+              "versionCompiler = 29",
+              "versionCompiler = 36"
+          )
+
+          s = s.replace(
+              "versionTarget = 27",
+              "versionTarget = 36"
+          )
+
+          s = s.replace(
+              "minSdkVersion = 19",
+              "minSdkVersion = 19"
+          )
+
+          s = s.replace(
+              "versionBuildTool = '27.0.3'",
+              "versionBuildTool = '36.0.0'"
+          )
+
+          p.write_text(s)
+
+          print("Patched AndroidUSBCamera root build.gradle")
+          PY
+
+      # ============================================================
+      # BUILD ONLY MODULES ACTUALLY REQUIRED BY libausbc
+      #
+      # libausbc -> libuvc + libnative
+      # libuvc -> libuvccommon
+      #
+      # libutils IS NOT REQUIRED BY libausbc.
+      # ============================================================
       - name: Build AndroidUSBCamera
         working-directory: /tmp/AndroidUSBCamera
         run: |
@@ -161,7 +198,6 @@ jobs:
           ./gradlew --version
 
           ./gradlew \
-            :libutils:assembleRelease \
             :libuvccommon:assembleRelease \
             :libnative:assembleRelease \
             :libuvc:assembleRelease \
@@ -169,36 +205,28 @@ jobs:
             --no-daemon \
             --stacktrace
 
-      # ------------------------------------------------------------
-      # Verify AARs
-      # ------------------------------------------------------------
+      # ============================================================
+      # VERIFY AUSBC OUTPUT
+      # ============================================================
       - name: Verify AndroidUSBCamera AARs
         run: |
           set -e
 
-          for aar in \
-            /tmp/AndroidUSBCamera/libutils/build/outputs/aar/libutils-release.aar \
-            /tmp/AndroidUSBCamera/libuvccommon/build/outputs/aar/libuvccommon-release.aar \
-            /tmp/AndroidUSBCamera/libnative/build/outputs/aar/libnative-release.aar \
-            /tmp/AndroidUSBCamera/libuvc/build/outputs/aar/libuvc-release.aar \
-            /tmp/AndroidUSBCamera/libausbc/build/outputs/aar/libausbc-release.aar
-          do
-            test -f "$aar"
-            ls -lh "$aar"
-          done
+          test -f /tmp/AndroidUSBCamera/libuvccommon/build/outputs/aar/libuvccommon-release.aar
+          test -f /tmp/AndroidUSBCamera/libnative/build/outputs/aar/libnative-release.aar
+          test -f /tmp/AndroidUSBCamera/libuvc/build/outputs/aar/libuvc-release.aar
+          test -f /tmp/AndroidUSBCamera/libausbc/build/outputs/aar/libausbc-release.aar
 
-      # ------------------------------------------------------------
-      # Copy AARs into Roverd
-      # ------------------------------------------------------------
+          echo "AUSBC AARs successfully built."
+
+      # ============================================================
+      # COPY AARS INTO ROVERD
+      # ============================================================
       - name: Copy AndroidUSBCamera AARs
         run: |
           set -e
 
           mkdir -p app/libs
-
-          cp \
-            /tmp/AndroidUSBCamera/libutils/build/outputs/aar/libutils-release.aar \
-            app/libs/ausbc-libutils-release.aar
 
           cp \
             /tmp/AndroidUSBCamera/libuvccommon/build/outputs/aar/libuvccommon-release.aar \
@@ -216,11 +244,12 @@ jobs:
             /tmp/AndroidUSBCamera/libausbc/build/outputs/aar/libausbc-release.aar \
             app/libs/ausbc-libausbc-release.aar
 
-          ls -lh app/libs/
+          echo "Copied AARs:"
+          ls -lh app/libs
 
-      # ------------------------------------------------------------
-      # Patch Roverd app dependency
-      # ------------------------------------------------------------
+      # ============================================================
+      # PATCH ROVERD APP DEPENDENCY
+      # ============================================================
       - name: Patch app dependency
         run: |
           set -e
@@ -236,6 +265,7 @@ jobs:
 
           text = path.read_text()
 
+          # Remove old Maven AUSBC dependency.
           patterns = [
               r'^\s*implementation\s*\(\s*"com\.github\.jiangdongguo[.:]AndroidUSBCamera[^"]*"\s*\)\s*$',
               r"^\s*implementation\s*\(\s*'com\.github\.jiangdongguo[.:]AndroidUSBCamera[^']*'\s*\)\s*$",
@@ -252,8 +282,21 @@ jobs:
                   flags=re.MULTILINE
               )
 
-          aar_text = '''    implementation(files(
-              "libs/ausbc-libutils-release.aar",
+          # Remove an old generated AAR block if this workflow
+          # has already patched the source once.
+          text = re.sub(
+              r'\s*implementation\(files\(\s*'
+              r'"libs/ausbc-libuvccommon-release\.aar",\s*'
+              r'"libs/ausbc-libnative-release\.aar",\s*'
+              r'"libs/ausbc-libuvc-release\.aar",\s*'
+              r'"libs/ausbc-libausbc-release\.aar"\s*'
+              r'\)\)',
+              "",
+              text,
+              flags=re.MULTILINE
+          )
+
+          aar_block = '''    implementation(files(
               "libs/ausbc-libuvccommon-release.aar",
               "libs/ausbc-libnative-release.aar",
               "libs/ausbc-libuvc-release.aar",
@@ -263,52 +306,60 @@ jobs:
 
           if "dependencies {" not in text:
               raise SystemExit(
-                  "ERROR: dependencies { block not found"
+                  "ERROR: dependencies { block not found in app/build.gradle.kts"
               )
 
           if "ausbc-libausbc-release.aar" not in text:
               text = text.replace(
                   "dependencies {",
-                  "dependencies {\n" + aar_text,
+                  "dependencies {\n" + aar_block,
                   1
               )
 
           path.write_text(text)
-          print("AUSBC dependency patched successfully.")
+
+          print("Roverd AUSBC dependency configured.")
           PY
 
-      # ------------------------------------------------------------
-      # Show what is actually being built
-      # ------------------------------------------------------------
-      - name: Verify Roverd Gradle configuration
+      # ============================================================
+      # SHOW CONFIGURATION
+      # ============================================================
+      - name: Verify Roverd configuration
         run: |
           set -e
 
           chmod +x gradlew
 
+          echo "===== Java ====="
+          java -version
+
+          echo
           echo "===== Roverd Gradle ====="
           ./gradlew --version
 
           echo
-          echo "===== AUSBC dependencies in app ====="
+          echo "===== AUSBC dependencies ====="
           grep -n \
             "ausbc-\|AndroidUSBCamera" \
             app/build.gradle.kts \
             || true
 
           echo
-          echo "===== AARs ====="
+          echo "===== AAR files ====="
           ls -lh app/libs/
 
-      # ------------------------------------------------------------
-      # Java 17 again for Roverd
-      # ------------------------------------------------------------
+      # ============================================================
+      # JAVA 17 FOR ROVERD
+      # ============================================================
       - name: Set up Java 17 for Roverd
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
+      # ============================================================
+      # OPTIONAL SIGNING KEY
+      # ============================================================
       - name: Restore optional signing key
         env:
           ROVER_SIGNING_P12_B64: ${{ secrets.ROVER_SIGNING_P12_B64 }}
@@ -323,11 +374,13 @@ jobs:
               > signing/roverd-update.p12
 
             chmod 600 signing/roverd-update.p12
+
+            echo "Signing key restored."
           fi
 
-      # ------------------------------------------------------------
-      # Build Roverd using Roverd's own Gradle wrapper
-      # ------------------------------------------------------------
+      # ============================================================
+      # BUILD ROVERD
+      # ============================================================
       - name: Build Roverd debug APK
         run: |
           set -e
@@ -339,9 +392,9 @@ jobs:
             --no-daemon \
             --stacktrace
 
-      # ------------------------------------------------------------
-      # Verify APK
-      # ------------------------------------------------------------
+      # ============================================================
+      # VERIFY APK
+      # ============================================================
       - name: Verify APK
         run: |
           set -e
@@ -353,9 +406,9 @@ jobs:
           echo "APK successfully created:"
           ls -lh "$APK"
 
-      # ------------------------------------------------------------
-      # Upload APK
-      # ------------------------------------------------------------
+      # ============================================================
+      # UPLOAD
+      # ============================================================
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
@@ -363,9 +416,9 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 
-      # ------------------------------------------------------------
-      # Publish latest debug release
-      # ------------------------------------------------------------
+      # ============================================================
+      # RELEASE
+      # ============================================================
       - name: Publish latest debug release
         if: github.ref == 'refs/heads/main'
         env:
