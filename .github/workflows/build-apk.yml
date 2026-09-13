@@ -94,6 +94,7 @@ jobs:
           apply plugin: 'com.android.library'
 
           android {
+              namespace "__NAMESPACE__"
               compileSdkVersion 36
 
               defaultConfig {
@@ -133,6 +134,7 @@ jobs:
           apply plugin: 'com.android.library'
 
           android {
+              namespace "__NAMESPACE__"
               compileSdkVersion 36
 
               defaultConfig {
@@ -186,6 +188,7 @@ jobs:
           import org.apache.tools.ant.taskdefs.condition.Os
 
           android {
+              namespace "__NAMESPACE__"
               compileSdkVersion 36
 
               defaultConfig {
@@ -242,6 +245,7 @@ jobs:
           apply plugin: 'com.android.library'
 
           android {
+              namespace "__NAMESPACE__"
               compileSdkVersion 36
 
               defaultConfig {
@@ -271,6 +275,40 @@ jobs:
           }
           EOF
           true
+
+      - name: Inject real namespaces from AndroidManifest.xml
+        run: |
+          set -e
+
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          modules = ["libausbc", "libuvc", "libnative", "libuvccommon"]
+
+          for module in modules:
+              gradle_file = Path(module) / "build.gradle"
+              manifest_file = Path(module) / "src" / "main" / "AndroidManifest.xml"
+
+              if not gradle_file.exists():
+                  continue
+
+              if not manifest_file.exists():
+                  raise SystemExit(f"ERROR: {manifest_file} not found - cannot determine namespace for {module}")
+
+              manifest_text = manifest_file.read_text()
+              match = re.search(r'package\s*=\s*"([^"]+)"', manifest_text)
+
+              if not match:
+                  raise SystemExit(f"ERROR: no package attribute found in {manifest_file}")
+
+              namespace = match.group(1)
+              print(f"{module}: namespace = {namespace}")
+
+              gradle_text = gradle_file.read_text()
+              gradle_text = gradle_text.replace('__NAMESPACE__', namespace)
+              gradle_file.write_text(gradle_text)
+          PY
 
       - name: Patch settings.gradle.kts
         run: |
@@ -348,6 +386,18 @@ jobs:
           echo
           echo "=== libausbc/build.gradle ==="
           cat libausbc/build.gradle
+
+          echo
+          echo "=== libuvc/build.gradle ==="
+          cat libuvc/build.gradle
+
+          echo
+          echo "=== libnative/build.gradle ==="
+          cat libnative/build.gradle
+
+          echo
+          echo "=== libuvccommon/build.gradle ==="
+          cat libuvccommon/build.gradle
 
       - name: Restore optional signing key
         env:
