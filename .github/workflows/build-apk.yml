@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout Roverd
         uses: actions/checkout@v4
 
       - name: Install tools
@@ -22,48 +22,60 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y unzip git
 
-      - name: Restore Roverd source
+      - name: Restore Roverd Android source
         run: |
           set -e
 
           if [ -f "roverd-android-source.zip" ]; then
+            echo "Using roverd-android-source.zip"
+
             rm -rf _android_source
-            mkdir _android_source
+            mkdir -p _android_source
+
             unzip -q roverd-android-source.zip -d _android_source
             cp -a _android_source/. .
+
             rm -rf _android_source
+
           elif compgen -G "payload/part*" > /dev/null; then
+            echo "Using payload parts"
+
             cat payload/part* > /tmp/roverd-source.b64
             base64 --decode /tmp/roverd-source.b64 > /tmp/roverd-source.zip
 
             rm -rf _android_source
-            mkdir _android_source
+            mkdir -p _android_source
+
             unzip -q /tmp/roverd-source.zip -d _android_source
             cp -a _android_source/. .
 
             rm -rf _android_source
-            rm -f /tmp/roverd-source.b64 /tmp/roverd-source.zip
+            rm -f /tmp/roverd-source.b64
+            rm -f /tmp/roverd-source.zip
+
           else
-            echo "ERROR: Roverd source not found"
+            echo "ERROR: Roverd Android source ZIP/payload not found."
             exit 1
           fi
 
-      - name: Set up Java 17
+      - name: Set up Java 11 for AndroidUSBCamera
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "11"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK
+      - name: Install Android SDK packages
         run: |
           sdkmanager \
             "platform-tools" \
-            "platforms;android-36" \
-            "build-tools;36.0.0" \
-            "ndk;25.2.9519653"
+            "platforms;android-29" \
+            "platforms;android-31" \
+            "build-tools;30.0.2" \
+            "ndk;21.0.6113669" \
+            "cmake;3.10.2.4988404"
 
       - name: Download AndroidUSBCamera 3.3.3
         run: |
@@ -77,274 +89,153 @@ jobs:
             https://github.com/jiangdongguo/AndroidUSBCamera.git \
             /tmp/AndroidUSBCamera
 
-      - name: Copy AndroidUSBCamera modules
+      - name: Build AndroidUSBCamera with its original Gradle project
+        working-directory: /tmp/AndroidUSBCamera
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_HOME }}
         run: |
           set -e
 
-          for module in libutils libausbc libuvc libnative libuvccommon; do
-            test -d "/tmp/AndroidUSBCamera/$module"
-            rm -rf "$module"
-            cp -a "/tmp/AndroidUSBCamera/$module" "./$module"
+          chmod +x ./gradlew
+
+          echo "Gradle wrapper:"
+          ./gradlew --version
+
+          echo "Building AUSBC library modules..."
+
+          ./gradlew \
+            :libutils:assembleRelease \
+            :libuvccommon:assembleRelease \
+            :libnative:assembleRelease \
+            :libuvc:assembleRelease \
+            :libausbc:assembleRelease \
+            --stacktrace
+
+      - name: Collect AUSBC AARs
+        run: |
+          set -e
+
+          mkdir -p app/libs
+          rm -f app/libs/ausbc-*.aar
+
+          for aar in \
+            /tmp/AndroidUSBCamera/libutils/build/outputs/aar/libutils-release.aar \
+            /tmp/AndroidUSBCamera/libuvccommon/build/outputs/aar/libuvccommon-release.aar \
+            /tmp/AndroidUSBCamera/libnative/build/outputs/aar/libnative-release.aar \
+            /tmp/AndroidUSBCamera/libuvc/build/outputs/aar/libuvc-release.aar \
+            /tmp/AndroidUSBCamera/libausbc/build/outputs/aar/libausbc-release.aar
+          do
+            if [ ! -f "$aar" ]; then
+              echo "ERROR: Missing AUSBC AAR:"
+              echo "$aar"
+              exit 1
+            fi
+
+            cp "$aar" app/libs/ausbc-$(basename "$aar")
           done
 
-      - name: Fix AndroidUSBCamera Gradle files
+          echo "AUSBC AARs:"
+          ls -lh app/libs/ausbc-*.aar
+
+      - name: Switch back to Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Patch Roverd app dependency
         run: |
           set -e
 
           python3 <<'PY'
           from pathlib import Path
           import re
-
-          modules = [
-              "libutils",
-              "libausbc",
-              "libuvc",
-              "libnative",
-              "libuvccommon",
-          ]
-
-          for module in modules:
-              p = Path(module) / "build.gradle"
-
-              if not p.exists():
-                  raise SystemExit(f"Missing {p}")
-
-              text = p.read_text()
-
-              # Remove old Kotlin plugin declarations.
-              text = re.sub(
-                  r"(?m)^\\s*apply plugin:\\s*['\"]kotlin-android['\"]\\s*$",
-                  "",
-                  text
-              )
-
-              text = re.sub(
-                  r"(?m)^\\s*id\\s+['\"]kotlin-android['\"]\\s*$",
-                  "",
-                  text
-              )
-
-              # Remove old Maven publishing plugin.
-              text = re.sub(
-                  r"(?m)^\\s*apply plugin:\\s*['\"]com\\.github\\.dcendents\\.android-maven['\"]\\s*$",
-                  "",
-                  text
-              )
-
-              # Replace rootProject.ext values with fixed compatible values.
-              replacements = {
-                  "rootProject.ext.versionCode": "1",
-                  "rootProject.ext.versionName": '"3.3.3"',
-                  "rootProject.ext.versionCompiler": "36",
-                  "rootProject.ext.versionTarget": "36",
-                  "rootProject.ext.minSdkVersion": "21",
-                  "rootProject.ext.versionBuildTool": '"36.0.0"',
-                  "rootProject.ext.javaSourceCompatibility": "JavaVersion.VERSION_17",
-                  "rootProject.ext.javaTargetCompatibility": "JavaVersion.VERSION_17",
-              }
-
-              for old, new in replacements.items():
-                  text = text.replace(old, new)
-
-              # Remove old buildToolsVersion references.
-              text = re.sub(
-                  r"(?m)^\\s*buildToolsVersion\\s+[^\\n]+$",
-                  "",
-                  text
-              )
-
-              p.write_text(text)
-
-          # Ensure project dependencies exist.
-          p = Path("libausbc/build.gradle")
-          text = p.read_text()
-
-          if "project(path: ':libuvc')" not in text:
-              text = text.replace(
-                  "dependencies {",
-                  "dependencies {\n    implementation project(path: ':libuvc')",
-                  1
-              )
-
-          if "project(path: ':libnative')" not in text:
-              text = text.replace(
-                  "dependencies {",
-                  "dependencies {\n    api project(path: ':libnative')",
-                  1
-              )
-
-          if "project(path: ':libutils')" not in text:
-              text = text.replace(
-                  "dependencies {",
-                  "dependencies {\n    implementation project(path: ':libutils')",
-                  1
-              )
-
-          p.write_text(text)
-
-          p = Path("libuvc/build.gradle")
-          text = p.read_text()
-
-          if "project(path: ':libuvccommon')" not in text:
-              text = text.replace(
-                  "dependencies {",
-                  "dependencies {\n    implementation project(path: ':libuvccommon')",
-                  1
-              )
-
-          p.write_text(text)
-          PY
-
-      - name: Add module namespaces
-        run: |
-          set -e
-
-          python3 <<'PY'
-          from pathlib import Path
-          import re
-
-          modules = [
-              "libutils",
-              "libausbc",
-              "libuvc",
-              "libnative",
-              "libuvccommon",
-          ]
-
-          for module in modules:
-              gradle = Path(module) / "build.gradle"
-              manifest = Path(module) / "src/main/AndroidManifest.xml"
-
-              text = gradle.read_text()
-
-              if re.search(r"\\bnamespace\\s+", text):
-                  continue
-
-              package_name = None
-
-              if manifest.exists():
-                  m = re.search(
-                      r'package\\s*=\\s*"([^"]+)"',
-                      manifest.read_text()
-                  )
-                  if m:
-                      package_name = m.group(1)
-
-              if not package_name:
-                  raise SystemExit(
-                      f"Could not determine namespace for {module}"
-                  )
-
-              text = text.replace(
-                  "android {",
-                  f"android {{\n    namespace '{package_name}'",
-                  1
-              )
-
-              gradle.write_text(text)
-          PY
-
-      - name: Patch settings.gradle.kts
-        run: |
-          set -e
-
-          python3 <<'PY'
-          from pathlib import Path
-
-          p = Path("settings.gradle.kts")
-
-          if not p.exists():
-              raise SystemExit("settings.gradle.kts not found")
-
-          text = p.read_text()
-
-          modules = [
-              ":libutils",
-              ":libausbc",
-              ":libuvc",
-              ":libnative",
-              ":libuvccommon",
-          ]
-
-          for module in modules:
-              line = f'include("{module}")'
-              if line not in text:
-                  text += "\n" + line
-
-          p.write_text(text)
-          PY
-
-      - name: Patch app dependency
-        run: |
-          set -e
-
-          python3 <<'PY'
-          from pathlib import Path
 
           p = Path("app/build.gradle.kts")
+
+          if not p.exists():
+              raise SystemExit("ERROR: app/build.gradle.kts not found")
+
           text = p.read_text()
 
-          old_dependencies = [
-              'implementation("com.github.jiangdongguo:AndroidUSBCamera:3.3.3")',
-              "implementation('com.github.jiangdongguo:AndroidUSBCamera:3.3.3')",
-              'implementation("com.github.jiangdongguo.AndroidUSBCamera:libausbc:3.3.3")',
-              "implementation('com.github.jiangdongguo.AndroidUSBCamera:libausbc:3.3.3')",
-          ]
+          # Remove the broken published AUSBC dependency.
+          text = re.sub(
+              r'^\s*implementation\s*\(\s*["\']com\.github\.jiangdongguo:AndroidUSBCamera:3\.3\.3["\']\s*\)\s*$',
+              '',
+              text,
+              flags=re.MULTILINE
+          )
 
-          for old in old_dependencies:
-              text = text.replace(
-                  old,
-                  'implementation(project(":libausbc"))'
-              )
+          text = re.sub(
+              r'^\s*implementation\s*\(\s*["\']com\.github\.jiangdongguo\.AndroidUSBCamera:libausbc:3\.3\.3["\']\s*\)\s*$',
+              '',
+              text,
+              flags=re.MULTILINE
+          )
 
-          if 'implementation(project(":libausbc"))' not in text:
+          # Remove any previous project-module dependency we may have added.
+          text = re.sub(
+              r'^\s*implementation\s*\(\s*project\s*\(\s*["\']:libausbc["\']\s*\)\s*\)\s*$',
+              '',
+              text,
+              flags=re.MULTILINE
+          )
+
+          dependency_block = """\
+              implementation(files(
+                  "libs/ausbc-libutils-release.aar",
+                  "libs/ausbc-libuvccommon-release.aar",
+                  "libs/ausbc-libnative-release.aar",
+                  "libs/ausbc-libuvc-release.aar",
+                  "libs/ausbc-libausbc-release.aar"
+              ))
+          """
+
+          if 'libs/ausbc-libausbc-release.aar' not in text:
+              if "dependencies {" not in text:
+                  text += "\n\ndependencies {\n}\n"
+
               text = text.replace(
                   "dependencies {",
-                  'dependencies {\n    implementation(project(":libausbc"))',
+                  "dependencies {\n" + dependency_block,
                   1
               )
 
           p.write_text(text)
           PY
 
-      - name: Configure NDK
+      - name: Configure Android SDK
         run: |
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/25.2.9519653" >> "$GITHUB_ENV"
-
           printf '%s\n' \
             "sdk.dir=$ANDROID_HOME" \
-            "ndk.dir=$ANDROID_HOME/ndk/25.2.9519653" \
             > local.properties
 
-      - name: Verify Gradle configuration
+      - name: Verify AUSBC integration
         run: |
           set -e
 
-          test -f libutils/build.gradle
-          test -f libausbc/build.gradle
-          test -f libuvc/build.gradle
-          test -f libnative/build.gradle
-          test -f libuvccommon/build.gradle
+          echo "Checking AUSBC AARs..."
 
-          grep -F 'implementation(project(":libausbc"))' \
+          test -f app/libs/ausbc-libutils-release.aar
+          test -f app/libs/ausbc-libuvccommon-release.aar
+          test -f app/libs/ausbc-libnative-release.aar
+          test -f app/libs/ausbc-libuvc-release.aar
+          test -f app/libs/ausbc-libausbc-release.aar
+
+          echo "Checking app Gradle file..."
+
+          grep -F 'libs/ausbc-libausbc-release.aar' \
             app/build.gradle.kts
 
-          grep -F 'include(":libutils")' settings.gradle.kts
-          grep -F 'include(":libausbc")' settings.gradle.kts
-          grep -F 'include(":libuvc")' settings.gradle.kts
-          grep -F 'include(":libnative")' settings.gradle.kts
-          grep -F 'include(":libuvccommon")' settings.gradle.kts
-
-          if grep -R \
-            "rootProject.ext.versionCode\\|rootProject.ext.versionName\\|rootProject.ext.versionCompiler\\|rootProject.ext.versionTarget\\|rootProject.ext.minSdkVersion" \
-            libutils libausbc libuvc libnative libuvccommon \
-            --include="build.gradle"; then
-            echo "ERROR: Old rootProject.ext references remain."
+          if grep -E \
+            'AndroidUSBCamera:3\.3\.3|project\(.*libausbc' \
+            app/build.gradle.kts; then
+            echo "ERROR: Old AUSBC dependency still present."
             exit 1
           fi
 
-          echo "Gradle configuration looks clean."
+          echo "AUSBC integration checks passed."
 
       - name: Restore optional signing key
         env:
@@ -365,7 +256,7 @@ jobs:
         with:
           gradle-version: "9.6.0"
 
-      - name: Build debug APK
+      - name: Build Roverd APK
         run: |
           gradle :app:assembleDebug --stacktrace
 
@@ -381,12 +272,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk roverd-android-debug.apk
+          set -e
+
+          cp \
+            app/build/outputs/apk/debug/app-debug.apk \
+            roverd-android-debug.apk
 
           if gh release view latest-debug >/dev/null 2>&1; then
-            gh release upload latest-debug roverd-android-debug.apk --clobber
+            gh release upload \
+              latest-debug \
+              roverd-android-debug.apk \
+              --clobber
           else
-            gh release create latest-debug roverd-android-debug.apk \
+            gh release create \
+              latest-debug \
+              roverd-android-debug.apk \
               --title "Latest Roverd Debug APK" \
               --notes "Roverd with Logitech C920 UVC camera support and 180-degree camera inversion."
           fi
