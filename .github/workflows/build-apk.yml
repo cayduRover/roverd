@@ -21,7 +21,7 @@ jobs:
         uses: actions/checkout@v4
 
       # ------------------------------------------------------------
-      # 1. Find and extract the Android source ZIP
+      # Find and extract the Android source ZIP
       # ------------------------------------------------------------
       - name: Find and extract Android source
         shell: bash
@@ -32,25 +32,22 @@ jobs:
 
           if [ -z "$ZIP_FILE" ]; then
             echo "ERROR: roverd-android-source.zip was not found."
-            echo
-            echo "Repository tree:"
             find . -maxdepth 5 -print | sort
             exit 1
           fi
 
-          echo "Found: $ZIP_FILE"
+          echo "Found source ZIP: $ZIP_FILE"
 
           rm -rf android-source
           mkdir -p android-source
 
           unzip -q -o "$ZIP_FILE" -d android-source
 
-          echo
           echo "Extracted source:"
           find android-source -maxdepth 6 -print | sort
 
       # ------------------------------------------------------------
-      # 2. Locate the real Android Gradle project
+      # Locate the actual Android project
       # ------------------------------------------------------------
       - name: Locate Android Gradle project
         shell: bash
@@ -74,9 +71,7 @@ jobs:
           )
 
           if [ -z "$PROJECT_ROOT" ]; then
-            echo "ERROR: Android Gradle project could not be located."
-            echo
-            echo "Search results:"
+            echo "ERROR: Could not find the Android Gradle project."
             find android-source \
               \( -name "settings.gradle" \
               -o -name "settings.gradle.kts" \
@@ -90,12 +85,11 @@ jobs:
 
           echo "ANDROID_PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
 
-          echo
           echo "Android project root:"
           echo "$PROJECT_ROOT"
 
       # ------------------------------------------------------------
-      # 3. JDK 17 for modern Roverd/Android Gradle tooling
+      # JDK 17 for modern Android tooling
       # ------------------------------------------------------------
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -104,7 +98,7 @@ jobs:
           java-version: "17"
 
       # ------------------------------------------------------------
-      # 4. Android SDK
+      # Android SDK
       # ------------------------------------------------------------
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -119,26 +113,43 @@ jobs:
             "platforms;android-36" \
             "build-tools;29.0.3" \
             "build-tools;36.0.0" \
-            "ndk;25.2.9519653" \
-            "cmake;3.10.2"
+            "ndk;25.2.9519653"
 
       # ------------------------------------------------------------
-      # 5. Build AndroidUSBCamera 3.3.3 from source
+      # Install a currently available CMake version.
       #
-      # Important:
-      # The old Maven dependency is NOT used.
-      # We build:
-      #   libuvccommon
-      #   libnative
-      #   libuvc
-      #   libausbc
-      #
-      # We intentionally do NOT build libutils because that module
-      # has obsolete dependencies which are unrelated to the UVC
-      # camera engine needed by this app.
+      # Do NOT request cmake;3.10.2 because the current runner's
+      # SDK repository is not providing that package.
+      # ------------------------------------------------------------
+      - name: Install CMake
+        shell: bash
+        run: |
+          set -e
+
+          CMAKE_VERSION="3.22.1"
+
+          sdkmanager "cmake;${CMAKE_VERSION}"
+
+          CMAKE_DIR="${ANDROID_SDK_ROOT}/cmake/${CMAKE_VERSION}"
+
+          if [ ! -x "${CMAKE_DIR}/bin/cmake" ]; then
+            echo "ERROR: CMake was not installed at:"
+            echo "$CMAKE_DIR"
+            find "${ANDROID_SDK_ROOT}/cmake" -maxdepth 2 -type f -name cmake -print || true
+            exit 1
+          fi
+
+          echo "CMAKE_DIR=$CMAKE_DIR" >> "$GITHUB_ENV"
+
+          "${CMAKE_DIR}/bin/cmake" --version
+
+      # ------------------------------------------------------------
+      # Clone AndroidUSBCamera 3.3.3
       # ------------------------------------------------------------
       - name: Clone AndroidUSBCamera 3.3.3
         run: |
+          set -e
+
           rm -rf /tmp/AndroidUSBCamera
 
           git clone \
@@ -148,22 +159,23 @@ jobs:
             /tmp/AndroidUSBCamera
 
       # ------------------------------------------------------------
-      # 6. Give the old AUSBC build its SDK/NDK configuration
+      # Configure AndroidUSBCamera
       # ------------------------------------------------------------
       - name: Configure AndroidUSBCamera
         run: |
+          set -e
+
           cat > /tmp/AndroidUSBCamera/local.properties <<EOF
           sdk.dir=${ANDROID_SDK_ROOT}
           ndk.dir=${ANDROID_SDK_ROOT}/ndk/25.2.9519653
-          cmake.dir=${ANDROID_SDK_ROOT}/cmake/3.10.2
+          cmake.dir=${CMAKE_DIR}
           EOF
 
-          echo "AndroidUSBCamera local.properties:"
+          echo "AUSBC local.properties:"
           cat /tmp/AndroidUSBCamera/local.properties
 
       # ------------------------------------------------------------
-      # 7. Old AUSBC 3.3.3 uses an old Gradle/AGP toolchain.
-      # Build it with Java 8.
+      # AUSBC 3.3.3 uses an old Gradle toolchain.
       # ------------------------------------------------------------
       - name: Switch to JDK 8 for AndroidUSBCamera
         uses: actions/setup-java@v5
@@ -171,13 +183,7 @@ jobs:
           distribution: temurin
           java-version: "8"
 
-      - name: Verify AUSBC build environment
-        working-directory: /tmp/AndroidUSBCamera
-        run: |
-          java -version
-          ./gradlew --version
-
-      - name: Build required AndroidUSBCamera modules
+      - name: Build AndroidUSBCamera native modules
         working-directory: /tmp/AndroidUSBCamera
         shell: bash
         run: |
@@ -192,9 +198,9 @@ jobs:
             --stacktrace
 
       # ------------------------------------------------------------
-      # 8. Copy the locally-built AARs into Roverd
+      # Copy locally-built AUSBC libraries into the Roverd app
       # ------------------------------------------------------------
-      - name: Install AUSBC AARs into Roverd
+      - name: Copy AUSBC libraries
         working-directory: ${{ env.ANDROID_PROJECT_ROOT }}
         shell: bash
         run: |
@@ -202,35 +208,23 @@ jobs:
 
           mkdir -p app/libs
 
-          find /tmp/AndroidUSBCamera \
-            -path '*/build/outputs/aar/*.aar' \
-            -print
-
           cp /tmp/AndroidUSBCamera/libuvccommon/build/outputs/aar/*.aar app/libs/
           cp /tmp/AndroidUSBCamera/libnative/build/outputs/aar/*.aar app/libs/
           cp /tmp/AndroidUSBCamera/libuvc/build/outputs/aar/*.aar app/libs/
           cp /tmp/AndroidUSBCamera/libausbc/build/outputs/aar/*.aar app/libs/
 
-          echo
-          echo "Roverd local libraries:"
+          echo "Installed AARs:"
           ls -lah app/libs
 
       # ------------------------------------------------------------
-      # 9. Remove the broken Maven AndroidUSBCamera dependency and
-      #    replace it with the locally-built AARs.
+      # Remove the broken published Maven dependency.
+      # Add the local AARs instead.
       # ------------------------------------------------------------
-      - name: Patch Roverd camera dependencies
+      - name: Patch AUSBC dependency
         working-directory: ${{ env.ANDROID_PROJECT_ROOT }}
         shell: bash
         run: |
           set -e
-
-          BUILD_FILE="app/build.gradle.kts"
-
-          if [ ! -f "$BUILD_FILE" ]; then
-            echo "ERROR: $BUILD_FILE does not exist."
-            exit 1
-          fi
 
           python3 <<'PY'
           from pathlib import Path
@@ -239,116 +233,98 @@ jobs:
           path = Path("app/build.gradle.kts")
           text = path.read_text(encoding="utf-8")
 
-          # Remove the broken published AUSBC dependency.
+          # Remove published AndroidUSBCamera dependency.
           text = re.sub(
               r'^[ \t]*implementation\([\'"]com\.github\.jiangdongguo:AndroidUSBCamera:3\.3\.3[\'"]\)\s*\n?',
               '',
               text,
-              flags=re.MULTILINE
+              flags=re.MULTILINE,
           )
 
-          # Remove the old Serenegiant dependency if still present.
+          # Remove old Serenegiant UVC dependency if present.
           text = re.sub(
               r'^[ \t]*(?:implementation|api)\([\'"]com\.serenegiant:[^\'"]+[\'"]\)\s*\n?',
               '',
               text,
-              flags=re.MULTILINE
+              flags=re.MULTILINE,
           )
 
-          # Add local AAR dependencies exactly once.
-          marker = '    implementation(files('
-
-          if marker not in text:
-              dependency_block = '''
+          local_deps = """
               implementation(files(
                   "libs/ausbc-libuvccommon-release.aar",
                   "libs/ausbc-libnative-release.aar",
                   "libs/ausbc-libuvc-release.aar",
                   "libs/ausbc-libausbc-release.aar"
               ))
-              '''
+          """
 
-              dependencies_match = re.search(
-                  r'dependencies\s*\{',
-                  text
-              )
+          if "libs/ausbc-libausbc-release.aar" not in text:
+              match = re.search(r'dependencies\s*\{', text)
 
-              if not dependencies_match:
-                  raise SystemExit(
-                      "Could not find dependencies { } block in app/build.gradle.kts"
-                  )
+              if not match:
+                  raise SystemExit("ERROR: dependencies { } block not found")
 
-              insert_at = dependencies_match.end()
-              text = text[:insert_at] + dependency_block + text[insert_at:]
+              pos = match.end()
+              text = text[:pos] + local_deps + text[pos:]
 
           path.write_text(text, encoding="utf-8")
           PY
 
-          echo
-          echo "Final AUSBC-related dependencies:"
-          grep -n -E 'AndroidUSBCamera|ausbc-|serenegiant|libuvc|libnative' \
+          echo "AUSBC references remaining in build file:"
+          grep -n -E \
+            'AndroidUSBCamera|ausbc-|libuvc|libnative|serenegiant' \
             app/build.gradle.kts || true
 
       # ------------------------------------------------------------
-      # 10. Remove the dead old source file if it exists.
+      # Remove obsolete Serenegiant source if present.
       # ------------------------------------------------------------
       - name: Remove obsolete UsbCameraSource
         working-directory: ${{ env.ANDROID_PROJECT_ROOT }}
-        shell: bash
         run: |
-          FILE="app/src/main/java/land/otter/roverd/UsbCameraSource.kt"
-
-          if [ -f "$FILE" ]; then
-            echo "Removing obsolete $FILE"
-            rm -f "$FILE"
-          else
-            echo "UsbCameraSource.kt not present; nothing to remove."
-          fi
+          rm -f \
+            app/src/main/java/land/otter/roverd/UsbCameraSource.kt
 
       # ------------------------------------------------------------
-      # 11. Restore the permanent signing key if present
+      # Restore signing key if present
       # ------------------------------------------------------------
       - name: Restore permanent APK signing key
         working-directory: ${{ env.ANDROID_PROJECT_ROOT }}
         shell: bash
         run: |
           if [ -f signing/roverd-update.p12.b64 ]; then
+            mkdir -p signing
+
             base64 --decode \
               signing/roverd-update.p12.b64 \
               > signing/roverd-update.p12
 
             echo "Signing key restored."
           else
-            echo "Signing key not found; normal debug signing will be used."
+            echo "Permanent signing key not present."
+            echo "Gradle debug signing will be used."
           fi
 
       # ------------------------------------------------------------
-      # 12. Switch back to Java 17 for Roverd
+      # Back to JDK 17 for Roverd
       # ------------------------------------------------------------
-      - name: Switch to JDK 17 for Roverd
+      - name: Switch back to JDK 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      # ------------------------------------------------------------
-      # 13. Gradle
-      # ------------------------------------------------------------
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "9.6.0"
 
       # ------------------------------------------------------------
-      # 14. Build Roverd
+      # Build Roverd
       # ------------------------------------------------------------
       - name: Build debug APK
         working-directory: ${{ env.ANDROID_PROJECT_ROOT }}
         run: |
           set -e
-
-          echo "Building from:"
-          pwd
 
           if [ -x "./gradlew" ]; then
             ./gradlew :app:assembleDebug \
@@ -361,7 +337,7 @@ jobs:
           fi
 
       # ------------------------------------------------------------
-      # 15. Locate generated APK
+      # Find APK
       # ------------------------------------------------------------
       - name: Locate APK
         working-directory: ${{ env.ANDROID_PROJECT_ROOT }}
@@ -370,8 +346,7 @@ jobs:
           set -e
 
           APK="$(find app/build/outputs/apk/debug \
-            -type f \
-            -name '*.apk' | head -n 1)"
+            -type f -name '*.apk' | head -n 1)"
 
           if [ -z "$APK" ]; then
             echo "ERROR: APK was not produced."
@@ -381,13 +356,12 @@ jobs:
 
           echo "APK_PATH=$APK" >> "$GITHUB_ENV"
 
-          echo "APK:"
-          echo "$APK"
+          echo "Found APK: $APK"
 
       # ------------------------------------------------------------
-      # 16. Upload artifact
+      # Upload artifact
       # ------------------------------------------------------------
-      - name: Upload debug APK artifact
+      - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: roverd-android-debug
@@ -395,16 +369,13 @@ jobs:
           retention-days: 30
 
       # ------------------------------------------------------------
-      # 17. Prepare release APK
+      # Release APK
       # ------------------------------------------------------------
       - name: Copy APK for release
         run: |
           cp "${ANDROID_PROJECT_ROOT}/${APK_PATH}" roverd-android-debug.apk
 
-      # ------------------------------------------------------------
-      # 18. Publish latest-debug release
-      # ------------------------------------------------------------
-      - name: Publish latest-debug GitHub release
+      - name: Publish latest-debug release
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
